@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Orçamento com Mercado Livre (auto)</title>
+<style>
+  :root{--bg:#0f1320;--card:#161a2a;--muted:#9aa3c7;--ink:#e7ecff;--accent:#7aa2ff}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,Segoe UI,Roboto,Arial}
+  .wrap{max-width:1100px;margin:28px auto;padding:16px}
+  .card{background:var(--card);border:1px solid #222742;border-radius:16px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.35);margin-bottom:14px}
+  h1{font-size:1.2rem;margin:0 0 8px}
+  label{font-size:.9rem;color:var(--muted);display:block;margin:0 0 6px}
+  input,select,button{width:100%;padding:10px 12px;background:#0e1220;color:var(--ink);border:1px solid #2a3154;border-radius:10px;font-size:1rem}
+  button{cursor:pointer;font-weight:700}
+  button:hover{border-color:var(--accent)}
+  .row{display:grid;gap:12px}
+  @media(min-width:900px){.row.cols-2{grid-template-columns:1fr 1fr}.row.cols-3{grid-template-columns:1fr 1fr 1fr}}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:10px}
+  .kpi{background:#0e1220;border:1px dashed #2a3154;border-radius:12px;padding:12px;text-align:center}
+  .kpi .label{color:var(--muted);font-size:.8rem}
+  .kpi .value{font-size:1.2rem;margin-top:6px;font-variant-numeric:tabular-nums}
+  .list{display:grid;gap:8px;margin-top:12px}
+  .item{background:#0e1220;border:1px solid #2a3154;border-radius:10px;padding:10px}
+  .item a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Orçamento (busca Mercado Livre + lucro)</h1>
+    <div class="row cols-3">
+      <div>
+        <label>Termo de busca (ex.: display samsung a10)</label>
+        <input id="q" placeholder="display samsung a10">
+      </div>
+      <div>
+        <label>Proxy (colar 1x — salva)</label>
+        <input id="proxy" placeholder="https://SEU-PROXY.vercel.app">
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <button id="btnSave">Salvar proxy</button>
+        <button id="btnBuscar">Buscar</button>
+      </div>
+    </div>
+
+    <div class="row cols-3" style="margin-top:6px">
+      <div>
+        <label>Forma de pagamento</label>
+        <select id="bandeira"></select>
+      </div>
+      <div>
+        <label>Parcelas</label>
+        <select id="parcelas"></select>
+      </div>
+      <div>
+        <label>Escolha custo (usando um anúncio)</label>
+        <input id="custo" type="number" step="0.01" placeholder="auto ao clicar em 'Usar'">
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="label">Custo detectado</div><div class="value" id="kCusto">—</div></div>
+      <div class="kpi"><div class="label">Preço à vista (faixa)</div><div class="value" id="kBase">—</div></div>
+      <div class="kpi"><div class="label">Lucro bruto (R$ / %)</div><div class="value" id="kLucro">—</div></div>
+      <div class="kpi"><div class="label">Preço final</div><div class="value" id="kTotal">—</div></div>
+      <div class="kpi"><div class="label">Parcela</div><div class="value" id="kParcela">—</div></div>
+    </div>
+
+    <div id="lista" class="list"></div>
+  </div>
+</div>
+
+<script>
+const KEY_PROXY='ml_proxy_base_v1';
+
+const FAIXAS=[
+  {min:0,max:100,preco:290},{min:100,max:200,preco:390},{min:200,max:300,preco:490},
+  {min:300,max:400,preco:590},{min:400,max:500,preco:890},{min:500,max:600,preco:990},
+  {min:600,max:700,preco:1090},{min:700,max:800,preco:1290},{min:800,max:900,preco:1450},
+  {min:900,max:1000,preco:1550},{min:1000,max:1100,preco:1650},{min:1100,max:1200,preco:1750},
+  {min:1200,max:1300,preco:1850},{min:1300,max:1400,preco:1950}
+];
+const TAXAS={
+  "Pix/Dinheiro":{debito:0,1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0,9:0,10:0,11:0,12:0},
+  "Visa/Master":{debito:1.37,1:3.15,2:5.39,3:6.12,4:6.85,5:7.57,6:8.28,7:8.99,8:9.69,9:10.38,10:11.06,11:11.74,12:12.40}
+};
+const BRL=v=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(v||0);
+
+function fillPayments(){
+  bandeira.innerHTML=Object.keys(TAXAS).map(b=>`<option>${b}</option>`).join('');
+  parcelas.innerHTML=`<option value="debito">Débito</option>${Array.from({length:12},(_,i)=>`<option value="${i+1}">${i+1}x</option>`).join('')}`;
+}
+fillPayments();
+
+function precoPorFaixa(custo){
+  for(const f of FAIXAS){ if(custo>=f.min && custo<=f.max) return f.preco; }
+  return 0;
+}
+
+function calcularTudo(custo){
+  custo = Number(custo||0);
+  const base = precoPorFaixa(custo);
+  const brand = bandeira.value;
+  const key = parcelas.value;
+  const taxa = Number(TAXAS?.[brand]?.[key])||0;
+  const total = base*(1+taxa/100);
+  const nParc = key==='debito'?0:parseInt(key,10);
+  const lucro = base - custo;
+  const lucroPct = base ? (lucro/base*100) : 0;
+
+  kCusto.textContent = custo? BRL(custo) : '—';
+  kBase.textContent  = base? BRL(base) : '—';
+  kLucro.textContent = base? `${BRL(lucro)} (${lucroPct.toFixed(1)}%)` : '—';
+  kTotal.textContent = base? BRL(total) : '—';
+  kParcela.textContent = (base && nParc)? `${BRL(total/nParc)} (${nParc}x)`:'—';
+}
+
+parcelas.addEventListener('change',()=>calcularTudo(Number(custo.value||0)));
+bandeira.addEventListener('change',()=>calcularTudo(Number(custo.value||0)));
+custo.addEventListener('input',()=>calcularTudo(Number(custo.value||0)));
+
+// Proxy save/load
+proxy.value = localStorage.getItem(KEY_PROXY)||'';
+document.getElementById('btnSave').onclick=()=>{
+  if(!proxy.value.trim()) return alert('Cole a URL do seu proxy (ex.: https://proxy-ml-XXXX.vercel.app)');
+  localStorage.setItem(KEY_PROXY, proxy.value.trim());
+  alert('Proxy salvo!');
+};
+
+document.getElementById('btnBuscar').onclick=async()=>{
+  const base = (localStorage.getItem(KEY_PROXY)||'').trim();
+  if(!base){ alert('Cole e salve a URL do proxy.'); return; }
+  if(!q.value.trim()){ alert('Digite o termo de busca.'); return; }
+  lista.innerHTML='Buscando...';
+  try{
+    const r = await fetch(`${base}/api/ml?q=${encodeURIComponent(q.value.trim())}`);
+    const data = await r.json();
+    const arr = (data.results||[]);
+    if(!arr.length){ lista.innerHTML='Nenhum resultado com filtros (50+ vendidos e vendedor gold/platinum).'; return; }
+    lista.innerHTML='';
+    let menor=Infinity;
+    arr.forEach(it=>{
+      const preco=Number(it.price||0);
+      if(preco<menor) menor=preco;
+      const div=document.createElement('div');
+      div.className='item';
+      div.innerHTML = `<b>${it.title}</b><br>${BRL(preco)} — vendidos: ${it.sold_quantity||0} — <a href="${it.permalink}" target="_blank">ver anúncio</a> <button style="margin-top:6px">Usar</button>`;
+      div.querySelector('button').onclick=()=>{ custo.value = preco; calcularTudo(preco); window.scrollTo({top:0,behavior:'smooth'}); };
+      lista.appendChild(div);
+    });
+    if(menor!==Infinity){ custo.value = menor; calcularTudo(menor); }
+  }catch(e){
+    console.error(e);
+    lista.innerHTML='Erro na busca (confira a URL do proxy).';
+  }
+};
+
+// init
+calcularTudo(0);
+</script>
+</body>
+</html>
