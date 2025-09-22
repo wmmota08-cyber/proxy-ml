@@ -2,13 +2,13 @@ export default async function handler(req, res) {
   const q = (req.query.q || '').toString().trim();
   if (!q) return res.status(400).json({ error: 'Missing query (?q=...)' });
 
-  const out = (code, data) => {
+  const cors = () => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    if (req.method === 'OPTIONS') return res.status(200).end();
-    return res.status(code).json(data);
   };
+  cors();
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
     const url = "https://lista.mercadolivre.com.br/" + encodeURIComponent(q);
@@ -18,22 +18,12 @@ export default async function handler(req, res) {
         "Accept": "text/html,application/xhtml+xml"
       }
     });
-    if (!r.ok) return out(502, { error: "Falha ao abrir página de busca", status: r.status });
+    if (!r.ok) return res.status(502).json({ error: "Falha ao abrir página de busca", status: r.status });
     const html = await r.text();
 
     const items = [];
-    const pushItem = (it) => {
-      if (!it) return;
-      const title = (it.title || '').toString().trim();
-      const price = Number(it.price || 0);
-      if (!title || !price) return;
-      const sold = Number(it.sold_quantity || 0);
-      const perm = it.permalink || it.url || null;
-      const rep = it.reputation || '';
-      items.push({ title, price, sold_quantity: sold, permalink: perm, reputation: rep });
-    };
 
-    // 1) Tenta JSON interno (__NEXT_DATA__)
+    // (A) Tenta JSON interno (__NEXT_DATA__)
     try {
       const m = html.match(/window\.__NEXT_DATA__\s*=\s*(\{.*?\})\s*<\/script>/s);
       if (m) {
@@ -44,12 +34,11 @@ export default async function handler(req, res) {
           if (typeof obj === 'object') {
             if (Array.isArray(obj.results)) {
               for (const it of obj.results) {
-                const price = Number(it.price || it.prices?.[0]?.amount || it.prices?.prices?.[0]?.amount || 0);
                 const title = it.title || it.name || it.short_title;
+                const price = Number(it.price || it.prices?.[0]?.amount || it.prices?.prices?.[0]?.amount || 0);
                 const sold  = Number(it.sold_quantity ?? it.soldQuantity ?? 0);
                 const link  = it.permalink || it.link || it.permaLink || (typeof it.url === 'string' ? it.url : null);
-                const rep   = it.seller?.seller_reputation?.level_id || it.seller_reputation?.level_id || '';
-                pushItem({ title, price, sold_quantity: sold, permalink: link, reputation: rep });
+                items.push({ title, price, sold_quantity: sold, permalink: link, source: "next_data" });
               }
             }
             for (const k of Object.keys(obj)) walk(obj[k]);
@@ -59,19 +48,16 @@ export default async function handler(req, res) {
       }
     } catch {}
 
-    // 2) Fallback: parse HTML bruto (cartões de resultado)
-    if (items.length < 3) {
-      // divide em blocos por cada item
+    // (B) Fallback: HTML bruto - estrutura UI Search nova
+    if (items.length < 1) {
       const cardRe = /<li[^>]*class="ui-search-layout__item[^"]*"[^>]*>([\s\S]*?)<\/li>/g;
       let m;
-      while ((m = cardRe.exec(html)) && items.length < 60) {
+      while ((m = cardRe.exec(html)) && items.length < 80) {
         const block = m[1];
-        const titleMatch = block.match(/class="ui-search-item__title"[^>]*>([^<]+)/) || block.match(/title="([^"]+)"\s+class="ui-search-link/);
+        const titleMatch = block.match(/class="ui-search-item__title"[^>]*>([^<]+)/) || block.match(/<h2[^>]*>([^<]+)<\/h2>/);
         const priceFrac  = block.match(/class="price-tag-fraction">([\d\.]+)/);
         const priceCents = block.match(/class="price-tag-cents">(\d+)/);
         const hrefMatch  = block.match(/<a[^>]+class="ui-search-link"[^>]+href="([^"]+)"/);
-        const soldMatch  = block.match(/(\d[\d\.]*)\s+vendidos?/i);
-        const repMatch   = block.match(/reputation|platinum|gold/i);
         let price = 0;
         if (priceFrac) {
           price = Number(priceFrac[1].replace(/\./g,''));
@@ -79,24 +65,29 @@ export default async function handler(req, res) {
         }
         const title = titleMatch ? titleMatch[1] : null;
         const link  = hrefMatch ? hrefMatch[1] : null;
-        const sold  = soldMatch ? Number(soldMatch[1].replace(/\./g,'')) : 0;
-        const rep   = repMatch ? (repMatch[0].toLowerCase().includes('platinum') ? 'platinum' : 'gold') : '';
-        pushItem({ title, price, sold_quantity: sold, permalink: link, reputation: rep });
+        if (title && price) items.push({ title, price, permalink: link, source: "html_ui_search" });
       }
     }
 
-    // 3) Limpeza e filtros
+    // (C) Fallback simples por JSONs inline com "price"/"title"
+    if (items.length < 1) {
+      const simple = [];
+      const re = /"title"\s*:\s*"([^"]+)"[\s\S]*?"price"\s*:\s*(\d+(?:\.\d+)?)/g;
+      let m;
+      while ((m = re.exec(html)) && simple.length < 80) {
+        simple.push({ title: m[1], price: Number(m[2]), source: "inline_json" });
+      }
+      items.push(...simple);
+    }
+
+    // Limpeza básica e ordenação
     const normalized = items
-      .filter((x, i, arr) => x.title && x.price && arr.findIndex(y => y.title === x.title && Math.abs(y.price - x.price) < 0.5) === i)
+      .filter((x) => x && x.title && x.price)
+      .filter((x, i, arr) => arr.findIndex(y => y.title === x.title && Math.abs(y.price - x.price) < 0.5) === i)
       .sort((a,b)=>a.price-b.price);
 
-    const filtered = normalized
-      .filter(x => (x.sold_quantity ?? 0) >= 50)                 // vendidos >= 50
-      .filter(x => !x.reputation || /gold|platinum/i.test(x.reputation)) // vendedor bom quando disponível
-      .slice(0, 40);
-
-    return out(200, { results: filtered, total: filtered.length, raw_count: normalized.length });
+    res.status(200).json({ results: normalized, total: normalized.length });
   } catch (e) {
-    return out(500, { error: 'Erro interno no proxy (scrape-strong)', details: String(e) });
+    res.status(500).json({ error: 'Erro interno (scrape-any)', details: String(e) });
   }
 }
