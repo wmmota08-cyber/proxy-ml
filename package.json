@@ -2,8 +2,5 @@
   "name": "proxy-ml",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
-  "dependencies": {
-    "node-fetch": "^3.3.2"
-  }
+  "type": "module"
 }
